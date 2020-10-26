@@ -5,49 +5,36 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
-	"os/signal"
-	"syscall"
-	"time"
+	"reflect"
 
-	"github.com/jmoiron/sqlx"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	_ "github.com/lib/pq" // postgresql implementation package in go
 	"github.com/shopspring/decimal"
+	"gopkg.in/go-playground/validator.v9"
 
-	"wager/config"
 	"wager/internal/domain"
-	repository "wager/internal/repository/postgres"
 )
 
 type (
 	// App application struct
 	App struct {
-		e    *echo.Echo
-		cfg  *config.Schema
-		repo *repository.PostgresRepository
+		e         *echo.Echo
+		repo      domain.WagerRepository
+		validator *validator.Validate
 	}
 )
 
 // New application
-func New() *App {
-	cfg, err := config.Load()
-	if err != nil {
-		log.Panicf("Cannot load configuration: %s\n", err.Error())
-	}
-
-	log.Printf("%+v", cfg)
-
-	dbConfig := fmt.Sprintf("user=%s dbname=%s host=%s port=%d sslmode=disable",
-		cfg.Database.Username, cfg.Database.Database, cfg.Database.Host, cfg.Database.Port)
-	log.Printf("Init db with these param %v", dbConfig)
-
+func New(repo domain.WagerRepository) *App {
 	app := &App{
-		cfg:  cfg,
-		e:    echo.New(),
-		repo: repository.New(sqlx.MustConnect("postgres", dbConfig)),
+		e:         echo.New(),
+		repo:      repo,
+		validator: validator.New(),
 	}
+
+	// create customr validator for numeric type
+	app.initNumericValidator()
 
 	// handle recover
 	app.e.Use(middleware.RecoverWithConfig(middleware.RecoverConfig{
@@ -66,26 +53,44 @@ func New() *App {
 	return app
 }
 
-// Run application
-func (app *App) Run() error {
-	go func() {
-		if err := app.e.Start(fmt.Sprintf(":%d", app.cfg.Service.Port)); err != nil {
-			// we shoud panic here, but I prefer a gracfully stop
-			// there will be live/health check in production environment
-			// if 1 of them is failed then the instance will be killed
-			log.Println("Shutting down the server")
+// Init validator for buying_price
+func (app *App) initNumericValidator() {
+	app.validator.RegisterCustomTypeFunc(func(f reflect.Value) interface{} {
+		fieldDecimal, ok := f.Interface().(decimal.Decimal)
+		if ok {
+			val, _ := fieldDecimal.Float64()
+			return val
 		}
-	}()
 
-	// wait for the signal
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	ch := make(chan os.Signal, 1)
-	signal.Notify(ch, syscall.SIGTERM, syscall.SIGINT, os.Kill)
+		return nil
+	}, decimal.Decimal{})
 
-	log.Printf("Received signal %s", <-ch)
-	defer cancel()
+	app.validator.RegisterValidationCtx("v_selling_price", func(ctx context.Context, fi validator.FieldLevel) bool {
+		sellingPrice := decimal.NewFromFloat(fi.Field().Float())
 
-	return app.e.Shutdown(ctx)
+		totalWagerValue := fi.Parent().FieldByName("TotalWagerValue").Int()
+		sellingPercentage := fi.Parent().FieldByName("SellingPercentage").Int()
+
+		return sellingPrice.GreaterThan(decimal.NewFromInt(totalWagerValue * sellingPercentage / 100))
+	})
+}
+
+// Run application
+func (app *App) Run(port int) error {
+	log.Printf("Start the server at :%d", port)
+	return app.e.Start(fmt.Sprintf(":%d", port))
+}
+
+// Close app and all the resources
+func (app *App) Close(ctx context.Context) error {
+	log.Println("Close the app")
+	if err := app.e.Shutdown(ctx); err != nil {
+		// we should panic here, but we have a db dependency, that's why I try to log it out
+		log.Printf("Shutdown http app error: %s\n", err.Error())
+	}
+
+	// close db connection
+	return app.repo.Close(ctx)
 }
 
 // this is for health check procedure
@@ -99,12 +104,17 @@ func (app *App) liveCheck(e echo.Context) error {
 
 // ErrorResponse ...
 type ErrorResponse struct {
-	Description string `json:"error"`
+	Description string `json:"description"`
 }
 
 func (e *ErrorResponse) Error() string {
 	return e.Description
 }
+
+// all the handlers will have the same pattern
+// First bind the request
+// Second validate it
+// Third call repository to persist the data
 
 func (app *App) placeWager(ctx echo.Context) error {
 	wager := domain.Wager{}
@@ -112,28 +122,34 @@ func (app *App) placeWager(ctx echo.Context) error {
 		return ctx.JSON(http.StatusBadRequest, ErrorResponse{Description: err.Error()})
 	}
 
-	if err := app.repo.Create(ctx.Request().Context(), &wager); err != nil {
+	if err := app.validator.StructCtx(ctx.Request().Context(), wager); err != nil {
+		return ctx.JSON(http.StatusBadRequest, ErrorResponse{Description: err.Error()})
+	}
+
+	res, err := app.repo.Create(ctx.Request().Context(), wager)
+	if err != nil {
 		return ctx.JSON(http.StatusInternalServerError, ErrorResponse{Description: err.Error()})
 	}
 
-	return ctx.JSON(http.StatusCreated, wager)
+	return ctx.JSON(http.StatusCreated, res)
 }
 
 // GetWagersRequest ...
-type GetWagersRequest struct {
-	Page  int `json:"page" query:"page"` // This one should be the wager id
-	Limit int `json:"limit" query:"limit"`
+type getWagersRequest struct {
+	Page  int `json:"page" query:"page" validate:"min=1"`          // This one should be the wager id
+	Limit int `json:"limit" query:"limit" validate:"min=1,max=20"` // There should be a maximum value for limit
 }
 
 func (app *App) getWagers(ctx echo.Context) error {
-	req := GetWagersRequest{}
+	req := getWagersRequest{}
 	if err := ctx.Bind(&req); err != nil {
 		return ctx.JSON(http.StatusBadRequest, ErrorResponse{Description: err.Error()})
 	}
 
-	if req.Limit == 0 || req.Limit > 20 {
-		req.Limit = 10
+	if err := app.validator.StructCtx(ctx.Request().Context(), req); err != nil {
+		return ctx.JSON(http.StatusBadRequest, ErrorResponse{Description: err.Error()})
 	}
+
 	wagers, _, err := app.repo.Get(ctx.Request().Context(), req.Page, req.Limit)
 	if err != nil {
 		return ctx.JSON(http.StatusInternalServerError, ErrorResponse{Description: err.Error()})
@@ -143,11 +159,25 @@ func (app *App) getWagers(ctx echo.Context) error {
 }
 
 // PurchaseRequest ...
-type PurchaseRequest struct {
+type purchaseRequest struct {
 	WagerID     int             `json:"wager_id" param:"wager_id" validate:"required"`
 	BuyingPrice decimal.Decimal `json:"buying_price" validate:"gt=0"`
 }
 
 func (app *App) buyWager(ctx echo.Context) error {
-	return nil
+	req := purchaseRequest{}
+	if err := ctx.Bind(&req); err != nil {
+		return ctx.JSON(http.StatusBadRequest, ErrorResponse{Description: err.Error()})
+	}
+
+	if err := app.validator.StructCtx(ctx.Request().Context(), req); err != nil {
+		return ctx.JSON(http.StatusBadRequest, ErrorResponse{Description: err.Error()})
+	}
+
+	res, err := app.repo.Purchase(ctx.Request().Context(), req.WagerID, req.BuyingPrice)
+	if err != nil {
+		return ctx.JSON(http.StatusInternalServerError, ErrorResponse{Description: err.Error()})
+	}
+
+	return ctx.JSON(http.StatusOK, res)
 }

@@ -1,38 +1,26 @@
-ARG GO_VERSION=1.14
+# Builder
+FROM golang:1.14.2-alpine3.11 as builder
 
-FROM golang:$GO_VERSION-alpine AS build
+RUN apk update && apk upgrade && \
+    apk --update add git make
 
-RUN apk add --no-cache \
-    gcc \
-    git \
-    musl-dev \
-    nodejs \
-    openssl \
-    postgresql-client \
-    yarn
-
-WORKDIR /wager
-
-COPY go.mod go.mod
-COPY go.sum go.sum
-RUN go mod download
+WORKDIR /app
 
 COPY . .
-RUN go install -v ./cmd
 
-FROM alpine:3.10
+RUN go build cmd/main.go -o wager
 
-RUN apk add --no-cache \
-    ca-certificates \
-    openssl \
-    postgresql-client
+# Distribution
+FROM alpine:latest
 
-RUN mkdir -p /etc/wager && \
-    mkdir -p /var/opt/wager
+RUN apk update && apk upgrade && \
+    apk --update --no-cache add tzdata && \
+    mkdir /app 
 
-COPY --from=build /go/bin/wager /
-COPY config/*.yml /etc/wager/config/
+WORKDIR /app 
 
 EXPOSE 8080
+
+COPY --from=builder /app/wager /app
 
 CMD ["./wager"]
