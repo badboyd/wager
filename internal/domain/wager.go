@@ -37,7 +37,7 @@ const (
 
 const (
 	ErrInvalidWagerID           = "wager_id is required and must be greater than 0"
-	ErrInvalidBuyingPrice       = "buying_price is required and must be greater than 0"
+	ErrInvalidBuyingPrice       = "buying_price is required with scale 2 and must be greater than 0"
 	ErrInvalidTotalWagerValue   = "total_wager_value is required and must be greater than 0"
 	ErrInvalidOdds              = "odds is required and must be greater than 0"
 	ErrInvalidSellingPercentage = "selling_percentage is invalid"
@@ -74,6 +74,11 @@ func (w *Wager) Validate(ctx context.Context) error {
 func (p *Purchase) Validate(cxt context.Context) error {
 	if p.WagerID <= 0 {
 		return errors.New(ErrInvalidWagerID)
+	}
+
+	// we only allow decimal value with sellingPriceScale
+	if p.BuyingPrice.Exponent() > sellingPriceScale {
+		return errors.New(ErrInvalidBuyingPrice)
 	}
 
 	if p.BuyingPrice.LessThanOrEqual(decimal.Zero) {
