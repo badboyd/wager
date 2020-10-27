@@ -22,7 +22,7 @@ func New(conn *sqlx.DB) *Repository {
 	}
 }
 
-// Create new wager
+// Create new wager, persist the wager to database
 func (w *Repository) Create(ctx context.Context, wager domain.Wager) (domain.Wager, error) {
 	query := `INSERT INTO wagers
 		(total_wager_value, selling_price, odds, selling_percentage, current_selling_price)
@@ -37,7 +37,7 @@ func (w *Repository) Create(ctx context.Context, wager domain.Wager) (domain.Wag
 	return res, err
 }
 
-// Get list of wagers
+// Get list of wagers from page and limit
 func (w *Repository) Get(ctx context.Context, wagerID, limit int) ([]domain.Wager, int, error) {
 	wagers := []domain.Wager{}
 
@@ -53,7 +53,8 @@ func (w *Repository) Get(ctx context.Context, wagerID, limit int) ([]domain.Wage
 	return wagers, wagers[len(wagers)-1].ID, nil
 }
 
-// Purchase a wager
+// Purchase a wager, lock the wager to avoid data race
+// do all biz logic here
 func (w *Repository) Purchase(ctx context.Context, wagerID int, buyingPrice decimal.Decimal) (domain.Purchase, error) {
 	purchase := domain.Purchase{}
 

@@ -5,36 +5,32 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"reflect"
 
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	_ "github.com/lib/pq" // postgresql implementation package in go
-	"github.com/shopspring/decimal"
-	"gopkg.in/go-playground/validator.v9"
 
 	"wager/internal/domain"
+)
+
+const (
+	maxWagerInPage = 20
 )
 
 type (
 	// App application struct
 	App struct {
-		e         *echo.Echo
-		repo      domain.WagerRepository
-		validator *validator.Validate
+		e    *echo.Echo
+		repo domain.WagerRepository
 	}
 )
 
 // New application
 func New(repo domain.WagerRepository) *App {
 	app := &App{
-		e:         echo.New(),
-		repo:      repo,
-		validator: validator.New(),
+		e:    echo.New(),
+		repo: repo,
 	}
-
-	// create customr validator for numeric type
-	app.initNumericValidator()
 
 	// handle recover
 	app.e.Use(middleware.RecoverWithConfig(middleware.RecoverConfig{
@@ -51,28 +47,6 @@ func New(repo domain.WagerRepository) *App {
 	app.e.POST("/buy/:wager_id", app.buyWager)
 
 	return app
-}
-
-// Init validator for buying_price
-func (app *App) initNumericValidator() {
-	app.validator.RegisterCustomTypeFunc(func(f reflect.Value) interface{} {
-		fieldDecimal, ok := f.Interface().(decimal.Decimal)
-		if ok {
-			val, _ := fieldDecimal.Float64()
-			return val
-		}
-
-		return nil
-	}, decimal.Decimal{})
-
-	app.validator.RegisterValidationCtx("v_selling_price", func(ctx context.Context, fi validator.FieldLevel) bool {
-		sellingPrice := decimal.NewFromFloat(fi.Field().Float())
-
-		totalWagerValue := fi.Parent().FieldByName("TotalWagerValue").Int()
-		sellingPercentage := fi.Parent().FieldByName("SellingPercentage").Int()
-
-		return sellingPrice.GreaterThan(decimal.NewFromInt(totalWagerValue * sellingPercentage / 100))
-	})
 }
 
 // Run application
@@ -104,7 +78,7 @@ func (app *App) liveCheck(e echo.Context) error {
 
 // ErrorResponse ...
 type ErrorResponse struct {
-	Description string `json:"description"`
+	Description string `json:"error"`
 }
 
 func (e *ErrorResponse) Error() string {
@@ -117,12 +91,14 @@ func (e *ErrorResponse) Error() string {
 // Third call repository to persist the data
 
 func (app *App) placeWager(ctx echo.Context) error {
+	log.Printf("Process a place wager request")
+
 	wager := domain.Wager{}
 	if err := ctx.Bind(&wager); err != nil {
 		return ctx.JSON(http.StatusBadRequest, ErrorResponse{Description: err.Error()})
 	}
 
-	if err := app.validator.StructCtx(ctx.Request().Context(), wager); err != nil {
+	if err := wager.Validate(ctx.Request().Context()); err != nil {
 		return ctx.JSON(http.StatusBadRequest, ErrorResponse{Description: err.Error()})
 	}
 
@@ -136,18 +112,33 @@ func (app *App) placeWager(ctx echo.Context) error {
 
 // GetWagersRequest ...
 type getWagersRequest struct {
-	Page  int `json:"page" query:"page" validate:"min=1"`          // This one should be the wager id
-	Limit int `json:"limit" query:"limit" validate:"min=1,max=20"` // There should be a maximum value for limit
+	Page  int `json:"page" query:"page"`   // This one should be the wager id
+	Limit int `json:"limit" query:"limit"` // There should be a maximum value for limit
 }
 
 func (app *App) getWagers(ctx echo.Context) error {
+	log.Printf("Process a get wagers request")
+
 	req := getWagersRequest{}
 	if err := ctx.Bind(&req); err != nil {
 		return ctx.JSON(http.StatusBadRequest, ErrorResponse{Description: err.Error()})
 	}
+	log.Printf("Start get wagers from %d limit %d", req.Page, req.Limit)
 
-	if err := app.validator.StructCtx(ctx.Request().Context(), req); err != nil {
-		return ctx.JSON(http.StatusBadRequest, ErrorResponse{Description: err.Error()})
+	// In my opinion, we should limit the number of returned wagers
+	//if the limit is less than or equal zero, I change it to max number returned wagers
+	// but the requirement does not say it so I assume I have to reject the large limt
+	// in this case I set max limit to 20
+	if req.Limit <= 0 || req.Limit > maxWagerInPage {
+		return ctx.JSON(http.StatusBadRequest, ErrorResponse{
+			Description: fmt.Sprintf("limit must be less than %d", maxWagerInPage),
+		})
+	}
+
+	if req.Page <= 0 {
+		return ctx.JSON(http.StatusBadRequest, ErrorResponse{
+			Description: "Page can not be less than or equal to zero",
+		})
 	}
 
 	wagers, _, err := app.repo.Get(ctx.Request().Context(), req.Page, req.Limit)
@@ -158,26 +149,22 @@ func (app *App) getWagers(ctx echo.Context) error {
 	return ctx.JSON(http.StatusOK, wagers)
 }
 
-// PurchaseRequest ...
-type purchaseRequest struct {
-	WagerID     int             `json:"wager_id" param:"wager_id" validate:"required"`
-	BuyingPrice decimal.Decimal `json:"buying_price" validate:"gt=0"`
-}
-
 func (app *App) buyWager(ctx echo.Context) error {
-	req := purchaseRequest{}
-	if err := ctx.Bind(&req); err != nil {
+	log.Printf("Process buy wager request")
+
+	purchase := domain.Purchase{}
+	if err := ctx.Bind(&purchase); err != nil {
 		return ctx.JSON(http.StatusBadRequest, ErrorResponse{Description: err.Error()})
 	}
 
-	if err := app.validator.StructCtx(ctx.Request().Context(), req); err != nil {
+	if err := purchase.Validate(ctx.Request().Context()); err != nil {
 		return ctx.JSON(http.StatusBadRequest, ErrorResponse{Description: err.Error()})
 	}
 
-	res, err := app.repo.Purchase(ctx.Request().Context(), req.WagerID, req.BuyingPrice)
+	res, err := app.repo.Purchase(ctx.Request().Context(), purchase.WagerID, purchase.BuyingPrice)
 	if err != nil {
 		return ctx.JSON(http.StatusInternalServerError, ErrorResponse{Description: err.Error()})
 	}
 
-	return ctx.JSON(http.StatusOK, res)
+	return ctx.JSON(http.StatusCreated, res)
 }

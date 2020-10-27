@@ -9,11 +9,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jmoiron/sqlx"
+
 	"wager/config"
 	"wager/internal/app"
 	"wager/internal/repository/postgres"
-
-	"github.com/jmoiron/sqlx"
 )
 
 func main() {
@@ -22,8 +22,9 @@ func main() {
 		log.Panicf("Cannot load configuration: %s\n", err.Error())
 	}
 
-	dbConfig := fmt.Sprintf("user=%s dbname=%s host=%s port=%d sslmode=disable",
-		cfg.Database.Username, cfg.Database.Database, cfg.Database.Host, cfg.Database.Port)
+	dbConfig := fmt.Sprintf("user=%s dbname=%s host=%s port=%d sslmode=disable password=%s",
+		cfg.Database.Username, cfg.Database.Database, cfg.Database.Host,
+		cfg.Database.Port, cfg.Database.Password)
 	log.Printf("Init db with these param %v", dbConfig)
 
 	app := app.New(postgres.New(sqlx.MustConnect("postgres", dbConfig)))

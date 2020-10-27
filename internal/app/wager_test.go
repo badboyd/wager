@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 
 	"github.com/labstack/echo/v4"
@@ -50,9 +51,11 @@ func TestPlaceWager(t *testing.T) {
 		name       string
 		in         domain.Wager
 		statusCode int
+		hasErr     bool
+		err        ErrorResponse
 	}{
 		{
-			name: "normal",
+			name: "successful place",
 			in: domain.Wager{
 				TotalWagerValue:   10,
 				Odds:              1,
@@ -62,7 +65,7 @@ func TestPlaceWager(t *testing.T) {
 			statusCode: 201,
 		},
 		{
-			name: "negative totat wager value",
+			name: "negative total_wager_value",
 			in: domain.Wager{
 				TotalWagerValue:   -1,
 				Odds:              1,
@@ -70,9 +73,13 @@ func TestPlaceWager(t *testing.T) {
 				SellingPrice:      decimal.NewFromFloat(10.11),
 			},
 			statusCode: 400,
+			hasErr:     true,
+			err: ErrorResponse{
+				Description: domain.ErrInvalidTotalWagerValue,
+			},
 		},
 		{
-			name: "bad selling price",
+			name: "invalid selling_price",
 			in: domain.Wager{
 				Odds:              1,
 				SellingPrice:      decimal.NewFromFloat(10.11),
@@ -80,6 +87,24 @@ func TestPlaceWager(t *testing.T) {
 				SellingPercentage: 100,
 			},
 			statusCode: 400,
+			hasErr:     true,
+			err: ErrorResponse{
+				Description: domain.ErrInvalidSellingPrice,
+			},
+		},
+		{
+			name: "invalid selling_price scale",
+			in: domain.Wager{
+				Odds:              1,
+				SellingPrice:      decimal.NewFromFloat(10.111),
+				TotalWagerValue:   100,
+				SellingPercentage: 100,
+			},
+			statusCode: 400,
+			hasErr:     true,
+			err: ErrorResponse{
+				Description: domain.ErrInvalidSellingPrice,
+			},
 		},
 	}
 
@@ -102,6 +127,13 @@ func TestPlaceWager(t *testing.T) {
 			ctx := echo.New().NewContext(req, rec)
 
 			app.placeWager(ctx)
+
+			if tc.hasErr {
+				var errRes ErrorResponse
+				assert.Nil(t, json.Unmarshal(rec.Body.Bytes(), &errRes))
+				assert.Equal(t, errRes, tc.err)
+			}
+
 			assert.Equal(t, rec.Code, tc.statusCode)
 		})
 	}
@@ -110,44 +142,48 @@ func TestPlaceWager(t *testing.T) {
 func TestBuyWager(t *testing.T) {
 	tcs := []struct {
 		name       string
-		in         domain.Wager
+		in         domain.Purchase
 		statusCode int
+		hasErr     bool
+		err        ErrorResponse
 	}{
 		{
-			name: "normal",
-			in: domain.Wager{
-				TotalWagerValue:   10,
-				Odds:              1,
-				SellingPercentage: 10,
-				SellingPrice:      decimal.NewFromFloat(10.11),
+			name: "successful purchase",
+			in: domain.Purchase{
+				WagerID:     1,
+				BuyingPrice: decimal.NewFromFloat(11.11),
 			},
 			statusCode: 201,
 		},
 		{
-			name: "negative totat wager value",
-			in: domain.Wager{
-				TotalWagerValue:   -1,
-				Odds:              1,
-				SellingPercentage: 10,
-				SellingPrice:      decimal.NewFromFloat(10.11),
+			name: "invalid wager_id",
+			in: domain.Purchase{
+				WagerID:     -1,
+				BuyingPrice: decimal.NewFromFloat(11.11),
 			},
 			statusCode: 400,
+			hasErr:     true,
+			err: ErrorResponse{
+				Description: domain.ErrInvalidWagerID,
+			},
 		},
 		{
-			name: "bad selling price",
-			in: domain.Wager{
-				Odds:              1,
-				SellingPrice:      decimal.NewFromFloat(10.11),
-				TotalWagerValue:   100,
-				SellingPercentage: 100,
+			name: "invalid buying_price",
+			in: domain.Purchase{
+				WagerID:     1,
+				BuyingPrice: decimal.NewFromFloat(-1.00),
 			},
 			statusCode: 400,
+			hasErr:     true,
+			err: ErrorResponse{
+				Description: domain.ErrInvalidBuyingPrice,
+			},
 		},
 	}
 
 	mockRepo := &mocks.WagerRepository{}
 	mockRepo.On("Close", mock.Anything).Return(nil)
-	mockRepo.On("Create", mock.Anything, mock.Anything).Return(domain.Wager{}, nil)
+	mockRepo.On("Purchase", mock.Anything, mock.Anything, mock.Anything).Return(domain.Purchase{}, nil)
 
 	app := New(mockRepo)
 	assert.NotNil(t, app)
@@ -158,12 +194,21 @@ func TestBuyWager(t *testing.T) {
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
 			data, _ := json.Marshal(tc.in)
-			req := httptest.NewRequest(http.MethodPost, "/wagers", bytes.NewBuffer(data))
+			wagerID := tc.in.WagerID
+			req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/buy/%d", wagerID), bytes.NewBuffer(data))
+
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+
 			rec := httptest.NewRecorder()
 			ctx := echo.New().NewContext(req, rec)
 
-			app.placeWager(ctx)
+			app.buyWager(ctx)
+
+			if tc.hasErr {
+				var errRes ErrorResponse
+				assert.Nil(t, json.Unmarshal(rec.Body.Bytes(), &errRes))
+				assert.Equal(t, errRes, tc.err)
+			}
 			assert.Equal(t, rec.Code, tc.statusCode)
 		})
 	}
@@ -175,10 +220,11 @@ func TestGetWagers(t *testing.T) {
 		page       int
 		limit      int
 		statusCode int
-		hasRes     bool
+		hasErr     bool
+		err        ErrorResponse
 	}{
 		{
-			name:       "normal",
+			name:       "get wagers sucessfully",
 			page:       1,
 			limit:      10,
 			statusCode: 200,
@@ -188,12 +234,17 @@ func TestGetWagers(t *testing.T) {
 			limit:      200,
 			page:       1,
 			statusCode: 400,
+			hasErr:     true,
+			err: ErrorResponse{
+				Description: fmt.Sprintf("limit must be less than %d", maxWagerInPage),
+			},
 		},
 	}
 
 	mockRepo := &mocks.WagerRepository{}
 	mockRepo.On("Close", mock.Anything).Return(nil)
-	mockRepo.On("Get", mock.AnythingOfType("int"), mock.AnythingOfType("int")).Return(make([]domain.Wager, 10), nil)
+	mockRepo.On("Get", mock.Anything, mock.AnythingOfType("int"), mock.AnythingOfType("int")).
+		Return(make([]domain.Wager, 10, 10), 10, nil)
 
 	app := New(mockRepo)
 	assert.NotNil(t, app)
@@ -205,14 +256,23 @@ func TestGetWagers(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 
 			req := httptest.NewRequest(http.MethodGet, "/wagers", nil)
-			req.URL.Query().Add("page", fmt.Sprint(tc.page))
-			req.URL.Query().Add("limit", fmt.Sprint(tc.limit))
+			values := url.Values{
+				"page":  []string{fmt.Sprint(tc.page)},
+				"limit": []string{fmt.Sprint(tc.limit)},
+			}
+			req.URL.RawQuery += values.Encode()
 
 			rec := httptest.NewRecorder()
 			ctx := echo.New().NewContext(req, rec)
 
 			app.getWagers(ctx)
 			assert.Equal(t, rec.Code, tc.statusCode)
+
+			if tc.hasErr {
+				var errRes ErrorResponse
+				assert.Nil(t, json.Unmarshal(rec.Body.Bytes(), &errRes))
+				assert.Equal(t, errRes, tc.err)
+			}
 		})
 	}
 }

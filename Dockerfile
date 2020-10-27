@@ -1,26 +1,18 @@
-# Builder
-FROM golang:1.14.2-alpine3.11 as builder
+FROM golang:1.15-buster AS builder
+WORKDIR /src
 
-RUN apk update && apk upgrade && \
-    apk --update add git make
+COPY go.mod go.sum ./
+RUN go mod download -x
+
+COPY . ./
+RUN go build -v -o /bin/wager cmd/*.go
+
+FROM debian:buster-slim
+RUN set -x && apt-get update && \
+  DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates && \
+  rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-
-COPY . .
-
-RUN go build cmd/main.go -o wager
-
-# Distribution
-FROM alpine:latest
-
-RUN apk update && apk upgrade && \
-    apk --update --no-cache add tzdata && \
-    mkdir /app 
-
-WORKDIR /app 
-
-EXPOSE 8080
-
-COPY --from=builder /app/wager /app
+COPY --from=builder /bin/wager ./
 
 CMD ["./wager"]

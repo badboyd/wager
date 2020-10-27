@@ -2,6 +2,7 @@ package domain
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -24,11 +25,63 @@ type (
 	// Purchase ...
 	Purchase struct {
 		ID          int             `json:"id"`
-		WagerID     int             `json:"wager_id"`
-		BuyingPrice decimal.Decimal `json:"buying_price"`
+		WagerID     int             `json:"wager_id" validate:"required"`
+		BuyingPrice decimal.Decimal `json:"buying_price" validate:"required"`
 		BoughtAt    time.Time       `json:"bought_at"`
 	}
 )
+
+const (
+	sellingPriceScale = 2
+)
+
+const (
+	ErrInvalidWagerID           = "wager_id is required and must be greater than 0"
+	ErrInvalidBuyingPrice       = "buying_price is required and must be greater than 0"
+	ErrInvalidTotalWagerValue   = "total_wager_value is required and must be greater than 0"
+	ErrInvalidOdds              = "odds is required and must be greater than 0"
+	ErrInvalidSellingPercentage = "selling_percentage is invalid"
+	ErrInvalidSellingPrice      = "selling_price is required with scale 2 and must be greater than total_wager_value * selling_percentage/100"
+)
+
+// Validate wager
+func (w *Wager) Validate(ctx context.Context) error {
+	if w.TotalWagerValue <= 0 {
+		return errors.New(ErrInvalidTotalWagerValue)
+	}
+
+	if w.Odds <= 0 {
+		return errors.New(ErrInvalidOdds)
+	}
+
+	if w.SellingPercentage < 0 || w.SellingPercentage > 100 {
+		return errors.New(ErrInvalidSellingPercentage)
+	}
+
+	// we only allow decimal value with sellingPriceScale
+	if w.SellingPrice.Exponent() > sellingPriceScale {
+		return errors.New(ErrInvalidSellingPrice)
+	}
+
+	if w.SellingPrice.LessThan(decimal.NewFromInt(int64(w.TotalWagerValue * w.SellingPercentage / 100))) {
+		return errors.New(ErrInvalidSellingPrice)
+	}
+
+	return nil
+}
+
+// Validate purchase
+func (p *Purchase) Validate(cxt context.Context) error {
+	if p.WagerID <= 0 {
+		return errors.New(ErrInvalidWagerID)
+	}
+
+	if p.BuyingPrice.LessThanOrEqual(decimal.Zero) {
+		return errors.New(ErrInvalidBuyingPrice)
+	}
+
+	return nil
+}
 
 // WagerRepository interface
 type WagerRepository interface {
